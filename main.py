@@ -2,19 +2,13 @@ import asyncio
 import os
 import socket
 import sys
-import traceback
 import threading
 import json
 
-if sys.platform != "win32":
-    print("Error: This project requires 'pydivert' which is only available on Windows.")
-    print("On Linux, WinDivert (the backend for pydivert) is not supported.")
-    sys.exit(1)
-
+from utils.logger import logger
 # from utils.proxy_protocols import parse_vless_protocol
 from utils.network_tools import get_default_interface_ipv4
 from utils.packet_templates import ClientHelloMaker
-from fake_tcp import FakeInjectiveConnection, FakeTcpInjector
 
 
 def get_exe_dir():
@@ -31,21 +25,31 @@ def get_exe_dir():
 config_path = os.path.join(get_exe_dir(), 'config.json')
 
 # Load the config
-with open(config_path, 'r') as f:
-    config = json.load(f)
+try:
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+except FileNotFoundError:
+    logger.error(f"Config file not found at {config_path}")
+    sys.exit(1)
+except json.JSONDecodeError:
+    logger.error(f"Failed to parse config.json")
+    sys.exit(1)
+except Exception as e:
+    logger.error(f"Unexpected error loading config: {e}")
+    sys.exit(1)
 
-LISTEN_HOST = config["LISTEN_HOST"]
-LISTEN_PORT = config["LISTEN_PORT"]
-FAKE_SNI = config["FAKE_SNI"].encode()
-CONNECT_IP = config["CONNECT_IP"]
-CONNECT_PORT = config["CONNECT_PORT"]
+LISTEN_HOST = config.get("LISTEN_HOST", "0.0.0.0")
+LISTEN_PORT = config.get("LISTEN_PORT", 40443)
+FAKE_SNI = config.get("FAKE_SNI", "google.com").encode()
+CONNECT_IP = config.get("CONNECT_IP", "1.1.1.1")
+CONNECT_PORT = config.get("CONNECT_PORT", 443)
 INTERFACE_IPV4 = get_default_interface_ipv4(CONNECT_IP)
 DATA_MODE = "tls"
 BYPASS_METHOD = "wrong_seq"
 
 ##################
 
-fake_injective_connections: dict[tuple, FakeInjectiveConnection] = {}
+fake_injective_connections = {}
 
 
 async def relay_main_loop(sock_1: socket.socket, sock_2: socket.socket, peer_task: asyncio.Task,
@@ -56,21 +60,24 @@ async def relay_main_loop(sock_1: socket.socket, sock_2: socket.socket, peer_tas
             try:
                 data = await loop.sock_recv(sock_1, 65575)
                 if not data:
-                    raise ValueError("eof")
+                    break
                 if first_prefix_data:
                     data = first_prefix_data + data
                     first_prefix_data = b""
-                sent_len = await loop.sock_sendall(sock_2, data)
-                if sent_len != len(data):
-                    raise ValueError("incomplete send")
-            except Exception:
-                sock_1.close()
-                sock_2.close()
-                peer_task.cancel()
-                return
-    except Exception:
-        traceback.print_exc()
-        sys.exit("relay main loop error!")
+                await loop.sock_sendall(sock_2, data)
+            except Exception as e:
+                logger.debug(f"Relay loop exception: {e}")
+                break
+    except Exception as e:
+        logger.error(f"Relay main loop fatal error: {e}")
+    finally:
+        try:
+            sock_1.close()
+            sock_2.close()
+        except:
+            pass
+        if not peer_task.done():
+            peer_task.cancel()
 
 
 async def handle(incoming_sock: socket.socket, incoming_remote_addr):
@@ -140,10 +147,23 @@ async def handle(incoming_sock: socket.socket, incoming_remote_addr):
         outgoing_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 2)
         outgoing_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
         src_port = outgoing_sock.getsockname()[1]
-        fake_injective_conn = FakeInjectiveConnection(outgoing_sock, INTERFACE_IPV4, CONNECT_IP, src_port, CONNECT_PORT,
-                                                      fake_data,
-                                                      BYPASS_METHOD, incoming_sock)
-        fake_injective_connections[fake_injective_conn.id] = fake_injective_conn
+
+        if sys.platform == "win32":
+            from fake_tcp import FakeInjectiveConnection
+            fake_injective_conn = FakeInjectiveConnection(outgoing_sock, INTERFACE_IPV4, CONNECT_IP, src_port, CONNECT_PORT,
+                                                          fake_data,
+                                                          BYPASS_METHOD, incoming_sock)
+            fake_injective_connections[fake_injective_conn.id] = fake_injective_conn
+        else:
+            # Placeholder for Linux connection monitoring
+            class LinuxFakeConn:
+                def __init__(self):
+                    self.id = (INTERFACE_IPV4, src_port, CONNECT_IP, CONNECT_PORT)
+                    self.monitor = True
+                    self.t2a_event = asyncio.Event()
+                    self.t2a_msg = "fake_data_ack_recv" # skip for now
+            fake_injective_conn = LinuxFakeConn()
+            fake_injective_conn.t2a_event.set()
         try:
             await loop.sock_connect(outgoing_sock, (CONNECT_IP, CONNECT_PORT))
         except Exception:
@@ -194,9 +214,8 @@ async def handle(incoming_sock: socket.socket, incoming_remote_addr):
 
 
 
-    except Exception:
-        traceback.print_exc()
-        sys.exit("handle should not raise exception")
+    except Exception as e:
+        logger.error(f"Handle exception: {e}")
 
 
 async def main():
@@ -221,13 +240,45 @@ async def main():
 
 
 if __name__ == "__main__":
-    w_filter = "tcp and " + "(" + "(ip.SrcAddr == " + INTERFACE_IPV4 + " and ip.DstAddr == " + CONNECT_IP + ")" + " or " + "(ip.SrcAddr == " + CONNECT_IP + " and ip.DstAddr == " + INTERFACE_IPV4 + ")" + ")"
-    fake_tcp_injector = FakeTcpInjector(w_filter, fake_injective_connections)
-    threading.Thread(target=fake_tcp_injector.run, args=(), daemon=True).start()
-    print("هشن شومافر تیامح دینکیم هدافتسا دازآ تنرتنیا هب یسرتسد یارب همانرب نیا زا رگا")
-    print(
-        "دراد امش تیامح هب زاین هک مراد رظن رد دازآ تنرتنیا هب ناریا مدرم مامت یسرتسد یارب یدایز یاه همانرب و اه هژورپ")
+    if sys.platform == "win32":
+        from fake_tcp import FakeTcpInjector
+        w_filter = "tcp and " + "(" + "(ip.SrcAddr == " + INTERFACE_IPV4 + " and ip.DstAddr == " + CONNECT_IP + ")" + " or " + "(ip.SrcAddr == " + CONNECT_IP + " and ip.DstAddr == " + INTERFACE_IPV4 + ")" + ")"
+        try:
+            fake_tcp_injector = FakeTcpInjector(w_filter, fake_injective_connections)
+            threading.Thread(target=fake_tcp_injector.run, args=(), daemon=True).start()
+        except Exception as e:
+            logger.error(f"Failed to start Windows Injector: {e}")
+    else:
+        from linux_injector import LinuxTcpInjector
+        logger.info("Initializing Linux Packet Injector...")
+        try:
+            l_filter = f"tcp and (src host {INTERFACE_IPV4} or dst host {INTERFACE_IPV4})"
+            linux_injector = LinuxTcpInjector(l_filter)
+            threading.Thread(target=linux_injector.run, args=(), daemon=True).start()
+        except Exception as e:
+            logger.error(f"Failed to start Linux Injector: {e}")
+
+    banner = """
+    \033[95m███████╗███╗   ██╗██╗      ███████╗██████╗  ██████╗  ██████╗ ███████╗██╗███╗   ██╗ ██████╗
+    ██╔════╝████╗  ██║██║      ██╔════╝██╔══██╗██╔═══██╗██╔═══██╗██╔════╝██║████╗  ██║██╔════╝
+    ███████╗██╔██╗ ██║██║█████╗███████╗██████╔╝██║   ██║██║   ██║█████╗  ██║██╔██╗ ██║██║  ███╗
+    ╚════██║██║╚██╗██║██║╚════╝╚════██║██╔═══╝ ██║   ██║██║   ██║██╔══╝  ██║██║╚██╗██║██║   ██║
+    ███████║██║ ╚████║██║      ███████║██║     ╚██████╔╝╚██████╔╝██║     ██║██║ ╚████║╚██████╔╝
+    ╚══════╝╚═╝  ╚═══╝╚═╝      ╚══════╝╚═╝      ╚═════╝  ╚═════╝ ╚═╝     ╚═╝╚═╝  ╚═══╝ ╚═════╝ \033[0m
+    """
+    print(banner)
+    print("\033[92m" + "  [+] هشن شومافر تیامح دینکیم هدافتسا دازآ تنرتنیا هب یسرتسد یارب همانرب نیا زا رگا" + "\033[0m")
+    print("\033[92m" + "  [+] دراد امش تیامح هب زاین هک مراد رظن رد دازآ تنرتنیا هب ناریا مدرم مامت یسرتسد یارب یدایز یاه همانرب و اه هژورپ" + "\033[0m")
     print("\n")
-    print("USDT (BEP20): 0x76a768B53Ca77B43086946315f0BDF21156bF424\n")
-    print("@patterniha")
-    asyncio.run(main())
+    print("\033[93m" + "  [*] USDT (BEP20): 0x76a768B53Ca77B43086946315f0BDF21156bF424" + "\033[0m")
+    print("\033[96m" + "  [*] Channel: @patterniha" + "\033[0m")
+    print("-" * 80)
+    logger.info(f"Listening on {LISTEN_HOST}:{LISTEN_PORT}")
+    logger.info(f"Targeting {CONNECT_IP}:{CONNECT_PORT} with SNI: {FAKE_SNI.decode()}")
+
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Application stopped by user.")
+    except Exception as e:
+        logger.critical(f"Main loop crashed: {e}")

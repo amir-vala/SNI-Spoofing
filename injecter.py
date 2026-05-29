@@ -1,37 +1,35 @@
 import sys
-from abc import ABC, abstractmethod
+from injector_base import BaseTcpInjector
+from utils.logger import logger
 
-from pydivert import WinDivert, Packet
+try:
+    from pydivert import WinDivert, Packet
+except ImportError:
+    # Not on Windows or pydivert not installed
+    WinDivert = None
+    Packet = None
 
-
-# from pydivert.consts import *
-
-
-class TcpInjector(ABC):
+class TcpInjector(BaseTcpInjector):
     def __init__(self, w_filter: str):
-        # self.interface_ipv4 = interface_ipv4
-        # self.interface_ipv6 = interface_ipv6
-        # ip_filter = ip4_filter = ip6_filter = ""
-        # if self.interface_ipv4:
-        #     ip4_filter = "(ip.SrcAddr == " + self.interface_ipv4 + " or ip.DstAddr == " + self.interface_ipv4 + ")"
-        #     ip_filter = ip4_filter
-        # if self.interface_ipv6:
-        #     ip6_filter = "(ipv6.SrcAddr == " + self.interface_ipv6 + " or ipv6.DstAddr == " + self.interface_ipv6 + ")"
-        #     ip_filter = ip6_filter
-        # if self.interface_ipv4 and self.interface_ipv6:
-        #     ip_filter = "(" + ip4_filter + " or " + ip6_filter + ")"
-        #
-        # self.filter = "tcp"
-        # if ip_filter:
-        #     self.filter += " and " + ip_filter
+        super().__init__(w_filter)
+        if WinDivert is None:
+            raise RuntimeError("WinDivert/pydivert is required for Windows Injector but not available.")
         self.w: WinDivert = WinDivert(w_filter)
 
-    @abstractmethod
-    def inject(self, packet: Packet):
-        sys.exit("Not implemented")
+    def inject(self, packet):
+        raise NotImplementedError("Subclasses must implement inject")
+
+    def send_packet(self, packet, inject: bool):
+        self.w.send(packet, inject)
 
     def run(self):
+        if not self.w:
+            logger.error("WinDivert not initialized.")
+            return
         with self.w:
             while True:
-                packet = self.w.recv(65575)
-                self.inject(packet)
+                try:
+                    packet = self.w.recv(65575)
+                    self.inject(packet)
+                except Exception as e:
+                    logger.error(f"Error in Windows Injector loop: {e}")
