@@ -6,6 +6,11 @@ import traceback
 import threading
 import json
 
+if sys.platform != "win32":
+    print("Error: This project requires 'pydivert' which is only available on Windows.")
+    print("On Linux, WinDivert (the backend for pydivert) is not supported.")
+    sys.exit(1)
+
 # from utils.proxy_protocols import parse_vless_protocol
 from utils.network_tools import get_default_interface_ipv4
 from utils.packet_templates import ClientHelloMaker
