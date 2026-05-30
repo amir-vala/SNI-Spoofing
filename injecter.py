@@ -140,7 +140,7 @@ class WinDivertPacket(PacketWrapper):
 
 class ScapyPacket(PacketWrapper):
     def __init__(self, nfpacket, interface_ip):
-        from scapy.all import IP, TCP
+        from scapy.layers.inet import IP, TCP
         self.nfpacket = nfpacket
         self.p = IP(nfpacket.get_payload())
         self.interface_ip = interface_ip
@@ -201,7 +201,8 @@ class ScapyPacket(PacketWrapper):
         return 0
 
     def set_tcp_payload(self, payload: bytes):
-        from scapy.all import Raw, TCP
+        from scapy.packet import Raw
+        from scapy.layers.inet import TCP
         if self.p.haslayer(Raw):
             self.p[Raw].load = payload
         else:
@@ -217,10 +218,13 @@ class ScapyPacket(PacketWrapper):
 
     def send(self, modify: bool = False):
         if modify:
-            from scapy.all import IP, TCP
-            # Scapy magic to fix lengths and checksums
-            self.nfpacket.set_payload(bytes(self.p))
-        self.nfpacket.accept()
+            from scapy.sendrecv import send
+            # For modified packets (injections), we send via raw socket
+            # and then we must also decide what to do with the original nfpacket.
+            # In this project's logic, we usually 'accept' the original later or earlier.
+            send(self.p, verbose=False)
+        else:
+            self.nfpacket.accept()
 
 class TcpInjector(ABC):
     def __init__(self, w_filter: str, interface_ip: str = None):

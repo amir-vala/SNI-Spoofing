@@ -156,8 +156,7 @@ if __name__ == "__main__":
     fake_tcp_injector = FakeTcpInjector(w_filter, fake_injective_connections, INTERFACE_IPV4)
     threading.Thread(target=fake_tcp_injector.run, args=(CONNECT_IP,), daemon=True).start()
 
-    log_info("Program started. Support us at:")
-    log_info("USDT (BEP20): 0x76a768B53Ca77B43086946315f0BDF21156bF424")
+    log_info("Program started.")
     log_info("Telegram: @patterniha")
 
     try:
