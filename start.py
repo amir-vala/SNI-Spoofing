@@ -40,13 +40,29 @@ def setup():
 
     return python_exe
 
+def is_admin():
+    try:
+        if platform.system() == "Windows":
+            import ctypes
+            return ctypes.windll.shell32.IsUserAnAdmin() != 0
+        else:
+            return os.geteuid() == 0
+    except AttributeError:
+        return False
+
 def main():
     print("--- SNI-Spoofing Auto Starter ---")
 
-    # Check for root on Linux
-    if platform.system() == "Linux" and os.geteuid() != 0:
-        print("Error: This script must be run as root (sudo) on Linux to intercept packets.")
-        sys.exit(1)
+    if not is_admin():
+        if platform.system() == "Windows":
+            print("Requesting administrator privileges...")
+            import ctypes
+            # Relaunch the script with admin rights
+            ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
+            sys.exit(0)
+        else:
+            print("Error: This script must be run as root (sudo) on Linux to intercept packets.")
+            sys.exit(1)
 
     python_exe = setup()
     if not python_exe:
