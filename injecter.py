@@ -128,7 +128,8 @@ class WinDivertPacket(PacketWrapper):
 
     def set_tcp_payload(self, payload: bytes):
         self.p.tcp.payload = payload
-        self.p.ip.packet_len = self.p.ip.packet_len + len(payload) # This might be handled by pydivert but just in case
+        # pydivert handles packet length and checksums automatically.
+        # Manual modification of ip.packet_len might be causing the [WinError 122].
         self.p.tcp.psh = True
 
     def set_ip_ident(self, ident: int):
