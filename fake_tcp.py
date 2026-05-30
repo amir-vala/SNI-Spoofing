@@ -4,10 +4,9 @@ import sys
 import threading
 import time
 
-from pydivert import Packet
-
 from monitor_connection import MonitorConnection
-from injecter import TcpInjector
+from injecter import TcpInjector, PacketWrapper
+from utils.logger import log_info, log_error, log_warn
 
 
 class FakeInjectiveConnection(MonitorConnection):
@@ -26,152 +25,142 @@ class FakeInjectiveConnection(MonitorConnection):
 
 class FakeTcpInjector(TcpInjector):
 
-    def __init__(self, w_filter: str, connections: dict[tuple, FakeInjectiveConnection]):
-        super().__init__(w_filter)
+    def __init__(self, w_filter: str, connections: dict[tuple, FakeInjectiveConnection], interface_ip: str = None):
+        super().__init__(w_filter, interface_ip)
         self.connections = connections
 
-    def fake_send_thread(self, packet: Packet, connection: FakeInjectiveConnection):
+    def fake_send_thread(self, packet: PacketWrapper, connection: FakeInjectiveConnection):
         time.sleep(0.001)
-        with connection.thread_lock:
-            if not connection.monitor:
-                return
+        try:
+            with connection.thread_lock:
+                if not connection.monitor:
+                    return
 
-            packet.tcp.psh = True
-            packet.ip.packet_len = packet.ip.packet_len + len(connection.fake_data)
-            packet.tcp.payload = connection.fake_data
-            if packet.ipv4:
-                packet.ipv4.ident = (packet.ipv4.ident + 1) & 0xffff
-            # if connection.bypass_method == "wrong_checksum":
-            #     ...
-            if connection.bypass_method == "wrong_seq":
-                packet.tcp.seq_num = (connection.syn_seq + 1 - len(packet.tcp.payload)) & 0xffffffff
-                connection.fake_sent = True
-                self.w.send(packet, True)
+                if connection.bypass_method == "wrong_seq":
+                    packet.tcp_seq = (connection.syn_seq + 1 - len(connection.fake_data)) & 0xffffffff
+                    packet.set_tcp_payload(connection.fake_data)
+                    packet.set_ip_ident((connection.syn_seq + 1) & 0xffff)
+                    connection.fake_sent = True
+                    packet.send(modify=True)
+                else:
+                    log_error(f"Bypass method {connection.bypass_method} not implemented!")
+        except Exception as e:
+            log_error(f"Error in fake_send_thread: {e}")
 
-
-
-
-            else:
-                sys.exit("not implemented method!")
-
-    def on_unexpected_packet(self, packet: Packet, connection: FakeInjectiveConnection, info_m: str):
-        print(info_m, packet)
-        connection.sock.close()
-        connection.peer_sock.close()
+    def on_unexpected_packet(self, packet: PacketWrapper, connection: FakeInjectiveConnection, info_m: str):
+        log_warn(f"{info_m} | Packet: {packet.ip_src}:{packet.tcp_src_port} -> {packet.ip_dst}:{packet.tcp_dst_port}")
+        try:
+            connection.sock.close()
+            connection.peer_sock.close()
+        except:
+            pass
         connection.monitor = False
         connection.t2a_msg = "unexpected_close"
-        connection.running_loop.call_soon_threadsafe(connection.t2a_event.set, )
-        self.w.send(packet, False)
+        try:
+            connection.running_loop.call_soon_threadsafe(connection.t2a_event.set)
+        except:
+            pass
+        packet.send(modify=False)
 
-    def on_inbound_packet(self, packet: Packet, connection: FakeInjectiveConnection):
+    def on_inbound_packet(self, packet: PacketWrapper, connection: FakeInjectiveConnection):
         if connection.syn_seq == -1:
             self.on_unexpected_packet(packet, connection, "unexpected inbound packet, no syn sent!")
             return
-        if packet.tcp.ack and packet.tcp.syn and (not packet.tcp.rst) and (not packet.tcp.fin) and (
-                len(packet.tcp.payload) == 0):
-            seq_num = packet.tcp.seq_num
-            ack_num = packet.tcp.ack_num
+
+        flags = packet.tcp_flags
+        if flags.ack and flags.syn and (not flags.rst) and (not flags.fin) and (packet.tcp_payload_len == 0):
+            seq_num = packet.tcp_seq
+            ack_num = packet.tcp_ack_num
             if connection.syn_ack_seq != -1 and connection.syn_ack_seq != seq_num:
                 self.on_unexpected_packet(packet, connection,
-                                          "unexpected inbound syn-ack packet, seq change! " + str(seq_num) + " " + str(
-                                              connection.syn_ack_seq))
+                                          f"unexpected inbound syn-ack packet, seq change! {seq_num} {connection.syn_ack_seq}")
                 return
             if ack_num != ((connection.syn_seq + 1) & 0xffffffff):
                 self.on_unexpected_packet(packet, connection,
-                                          "unexpected inbound syn-ack packet, ack not matched! " + str(
-                                              ack_num) + " " + str(connection.syn_seq))
+                                          f"unexpected inbound syn-ack packet, ack not matched! {ack_num} {connection.syn_seq}")
                 return
             connection.syn_ack_seq = seq_num
-            self.w.send(packet, False)
+            packet.send(modify=False)
             return
-        if packet.tcp.ack and (not packet.tcp.syn) and (not packet.tcp.rst) and (
-                not packet.tcp.fin) and (len(packet.tcp.payload) == 0) and connection.fake_sent:
-            seq_num = packet.tcp.seq_num
-            ack_num = packet.tcp.ack_num
+
+        if flags.ack and (not flags.syn) and (not flags.rst) and (not flags.fin) and (packet.tcp_payload_len == 0) and connection.fake_sent:
+            seq_num = packet.tcp_seq
+            ack_num = packet.tcp_ack_num
             if connection.syn_ack_seq == -1 or ((connection.syn_ack_seq + 1) & 0xffffffff) != seq_num:
                 self.on_unexpected_packet(packet, connection,
-                                          "unexpected inbound ack packet, seq not matched! " + str(seq_num) + " " + str(
-                                              connection.syn_ack_seq))
+                                          f"unexpected inbound ack packet, seq not matched! {seq_num} {connection.syn_ack_seq}")
                 return
             if ack_num != ((connection.syn_seq + 1) & 0xffffffff):
                 self.on_unexpected_packet(packet, connection,
-                                          "unexpected inbound ack packet, ack not matched! " + str(ack_num) + " " + str(
-                                              connection.syn_seq))
+                                          f"unexpected inbound ack packet, ack not matched! {ack_num} {connection.syn_seq}")
                 return
 
             connection.monitor = False
             connection.t2a_msg = "fake_data_ack_recv"
-            connection.running_loop.call_soon_threadsafe(connection.t2a_event.set, )
+            try:
+                connection.running_loop.call_soon_threadsafe(connection.t2a_event.set)
+            except:
+                pass
             return
-        self.on_unexpected_packet(packet, connection, "unexpected inbound packet")
-        return
 
-    def on_outbound_packet(self, packet: Packet, connection: FakeInjectiveConnection):
+        self.on_unexpected_packet(packet, connection, "unexpected inbound packet")
+
+    def on_outbound_packet(self, packet: PacketWrapper, connection: FakeInjectiveConnection):
         if connection.sch_fake_sent:
             self.on_unexpected_packet(packet, connection, "unexpected outbound packet, recv packet after fake sent!")
             return
-        if packet.tcp.syn and (not packet.tcp.ack) and (not packet.tcp.rst) and (not packet.tcp.fin) and (
-                len(packet.tcp.payload) == 0):
-            seq_num = packet.tcp.seq_num
-            ack_num = packet.tcp.ack_num
-            if ack_num != 0:
-                self.on_unexpected_packet(packet, connection, "unexpected outbound syn packet, ack_num is not zero!")
-                return
+
+        flags = packet.tcp_flags
+        if flags.syn and (not flags.ack) and (not flags.rst) and (not flags.fin) and (packet.tcp_payload_len == 0):
+            seq_num = packet.tcp_seq
             if connection.syn_seq != -1 and connection.syn_seq != seq_num:
-                self.on_unexpected_packet(packet, connection, "unexpected outbound syn packet, seq not matched! " + str(
-                    seq_num) + " " + str(connection.syn_seq))
+                self.on_unexpected_packet(packet, connection, f"unexpected outbound syn packet, seq not matched! {seq_num} {connection.syn_seq}")
                 return
             connection.syn_seq = seq_num
-            self.w.send(packet, False)
+            packet.send(modify=False)
             return
-        if packet.tcp.ack and (not packet.tcp.syn) and (not packet.tcp.rst) and (not packet.tcp.fin) and (
-                len(packet.tcp.payload) == 0):
-            seq_num = packet.tcp.seq_num
-            ack_num = packet.tcp.ack_num
+
+        if flags.ack and (not flags.syn) and (not flags.rst) and (not flags.fin) and (packet.tcp_payload_len == 0):
+            seq_num = packet.tcp_seq
+            ack_num = packet.tcp_ack_num
             if connection.syn_seq == -1 or ((connection.syn_seq + 1) & 0xffffffff) != seq_num:
                 self.on_unexpected_packet(packet, connection,
-                                          "unexpected outbound ack packet, seq not matched! " + str(
-                                              seq_num) + " " + str(
-                                              connection.syn_seq))
+                                          f"unexpected outbound ack packet, seq not matched! {seq_num} {connection.syn_seq}")
                 return
             if connection.syn_ack_seq == -1 or ack_num != ((connection.syn_ack_seq + 1) & 0xffffffff):
                 self.on_unexpected_packet(packet, connection,
-                                          "unexpected outbound ack packet, ack not matched! " + str(
-                                              ack_num) + " " + str(
-                                              connection.syn_ack_seq))
+                                          f"unexpected outbound ack packet, ack not matched! {ack_num} {connection.syn_ack_seq}")
                 return
 
-            self.w.send(packet, False)
+            packet.send(modify=False)
             connection.sch_fake_sent = True
             threading.Thread(target=self.fake_send_thread, args=(packet, connection), daemon=True).start()
             return
-        self.on_unexpected_packet(packet, connection, "unexpected outbound packet")
-        return
 
-    def inject(self, packet: Packet):
+        self.on_unexpected_packet(packet, connection, "unexpected outbound packet")
+
+    def inject(self, packet: PacketWrapper):
         if packet.is_inbound:
-            c_id = (packet.ip.dst_addr, packet.tcp.dst_port, packet.ip.src_addr, packet.tcp.src_port)
-            try:
-                connection = self.connections[c_id]
-            except KeyError:
-                self.w.send(packet, False)
+            c_id = (packet.ip_dst, packet.tcp_dst_port, packet.ip_src, packet.tcp_src_port)
+            connection = self.connections.get(c_id)
+            if not connection:
+                packet.send(modify=False)
             else:
                 with connection.thread_lock:
                     if not connection.monitor:
-                        self.w.send(packet, False)
+                        packet.send(modify=False)
                         return
                     self.on_inbound_packet(packet, connection)
         elif packet.is_outbound:
-            c_id = (packet.ip.src_addr, packet.tcp.src_port, packet.ip.dst_addr, packet.tcp.dst_port)
-            try:
-                connection = self.connections[c_id]
-            except KeyError:
-                self.w.send(packet, False)
+            c_id = (packet.ip_src, packet.tcp_src_port, packet.ip_dst, packet.tcp_dst_port)
+            connection = self.connections.get(c_id)
+            if not connection:
+                packet.send(modify=False)
             else:
                 with connection.thread_lock:
                     if not connection.monitor:
-                        self.w.send(packet, False)
+                        packet.send(modify=False)
                         return
                     self.on_outbound_packet(packet, connection)
         else:
-            sys.exit("impossible direction!")
+            log_error("impossible direction!")

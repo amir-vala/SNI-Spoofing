@@ -1,2 +1,4 @@
-
 pydivert>=3.1.0
+rich
+scapy
+NetfilterQueue
