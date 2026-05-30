@@ -1,6 +1,7 @@
 import sys
 from abc import ABC, abstractmethod
 from utils.logger import log_info, log_error, log_warn
+from scapy.all import IP, TCP, Raw
 
 class PacketWrapper(ABC):
     @property
@@ -141,7 +142,6 @@ class WinDivertPacket(PacketWrapper):
 
 class ScapyPacket(PacketWrapper):
     def __init__(self, nfpacket, interface_ip):
-        from scapy.layers.inet import IP, TCP
         self.nfpacket = nfpacket
         self.p = IP(nfpacket.get_payload())
         self.interface_ip = interface_ip
